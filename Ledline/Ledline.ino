@@ -1,8 +1,9 @@
 /*
  *  0.1  Switch on/off with dimming effect.
  *  1.0  Brightness adjustment (NEC:0 only)
+ *  1.1  Exponential brightness adjustment, constant speed.
  */
-#define VERSION 0x0100  // 0.1
+#define VERSION 0x0101
 
 class task
 {
@@ -109,6 +110,8 @@ task::queue Queue;
 #define LEDLINE_PIN       5   
 #define TEST_BUTTON_PIN   6
 
+#include <math.h>
+
 class ledline
 {
   public:
@@ -133,7 +136,7 @@ class ledline
     {
       if(_level != Level)
       {
-        LevelTask.begin(_level);
+        LevelTask.begin(_level, _adjust);
         Queue.put(&LevelTask);
       }
     }
@@ -158,11 +161,16 @@ class ledline
                   uint8_t Level;              //< Current ledline control pin PWМ level.
                   uint8_t Pin;                //< Ledline control pin.
                   uint8_t AdjustedMaxLevel;   //< Adjusted brightnes maximum
+
+    uint8_t correct(uint8_t _level) const
+    {
+      return ceil(exp((log(256)/255)*_level) - 1);
+    }
     
     void set(uint8_t _level)
     {
       Level = _level;
-      analogWrite(Pin, Level);
+      analogWrite(Pin, correct(Level));
     }
 
     class task:public ::task
@@ -199,7 +207,7 @@ class ledline
           void operator()()
           {
             int dt = millis() - Time;
-            int dl = (((long)Distance)*dt)/LevelingTime;
+            int dl = (((long)(Distance < 0 ? -1:+1)*(MaxLevel - MinLevel))*dt)/LevelingTime;
 
             Stat.Count++;
 
