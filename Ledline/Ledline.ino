@@ -1,45 +1,42 @@
 /*
- *  0.1  Switch on/off with dimming effect.
- *  1.0  Brightness adjustment (NEC:0 only)
- *  1.1  Exponential brightness adjustment, constant speed.
+ *  0.1   Switch on/off with dimming effect.
+ *  1.0   Brightness adjustment (NEC:0 only)
+ *  1.1   Exponential brightness adjustment, constant speed.
+ *  1.2   Shortened brightness transition time (1024 ms).
+ *        4 brightness transition levels.
+ *        Integral gamma correction. 
+ *        Toggle maximizes brightness.
  */
-#define VERSION 0x0101
+#define VERSION 0x0102
 
 class task
 {
   public:
 
-  task():Next(NULL){}
+    task():Next(NULL){}
 
-  virtual void operator()() = 0;
+    virtual void operator()() = 0;
 
-  class queue
-  { 
-    public:
+    /** Check if the task is in processing queue.
+     *  \return true if the task is in queue or false otherwise.
+     */
+    bool idle() const
+    {
+      return Next == NULL;
+    }
 
-      queue():Tail(NULL){}
+    class queue
+    { 
+      public:
 
-      bool populated() const
-      {
-        return Tail != NULL;
-      }
-      
-      task* get()
-      {
-        auto t = Tail->Next;
-        if(t == Tail)
-          Tail = NULL;
-        else
-          Tail->Next = t->Next;
-        t->Next = NULL;
-        return t;
-      }
+        /** Create empty queue. */
+        queue():Tail(NULL){}
 
-      void put(task *t)
-      {
-        if(t->Next == NULL)
+        /** Put task in processing queue.
+         *  \param[in]  _t  Task to put into the queue.
+         */
+        void put(task *t)
         {
-          /* t is not in any queue */
           if(Tail)
           {
             t->Next = Tail->Next;
@@ -49,27 +46,44 @@ class task
             t->Next = t;
           Tail = t;
         }
-      }
+  
+        virtual void dispatch()
+        {
+          if(Tail)
+            (*get())();
+        }
+
+      protected:
+        
+        task* get()
+        {
+          auto t = Tail->Next;
+          if(t == Tail)
+            Tail = NULL;
+          else
+            Tail->Next = t->Next;
+          t->Next = NULL;
+          return t;
+        }
+  
+      private:
+  
+        /* 
+         *  Task queue as circular linked list.
+         *              Tail  
+         *                | 
+         *                v
+         *  T1->T2->...->Tn
+         *  ^             |
+         *  +-------------+
+         */
+         task *Tail;
       
-    private:
-
-    /* 
-     *  Task queue as circular linked list.
-     *              Tail  
-     *                | 
-     *                v
-     *  T1->T2->...->Tn
-     *  ^             |
-     *  +-------------+
-     */
-
-    task *Tail;
-    
-  };
+    };
 
   private:
 
-  task *Next;
+    task *Next;
   
 };
 
@@ -110,7 +124,19 @@ task::queue Queue;
 #define LEDLINE_PIN       5   
 #define TEST_BUTTON_PIN   6
 
-#include <math.h>
+struct udiv8_t
+{
+  uint8_t quot;
+  uint8_t rem;
+  udiv8_t(){}
+  udiv8_t(uint8_t _q, uint8_t _r):quot(_q), rem(_r){}
+};
+
+
+struct udiv8_t udiv(uint16_t _n, uint8_t _d)
+{
+  return udiv8_t(_n/_d, _n%_d);
+}
 
 class ledline
 {
@@ -129,21 +155,22 @@ class ledline
 
     void toggle_discrete()
     {
-      Queue.put(&SwitchTask);
+      if(SwitchTask.idle())
+        Queue.put(&SwitchTask);
     }
 
     void fill_up_to(uint8_t _level, bool _adjust = false)
     {
-      if(_level != Level)
+      if(_level != Level && LevelTask.idle())
       {
         LevelTask.begin(_level, _adjust);
         Queue.put(&LevelTask);
       }
     }
 
-    void toggle()
+    void toggle(uint8_t _level = 0)
     {
-      fill_up_to(Level ? MinLevel:AdjustedMaxLevel);
+      fill_up_to(Level ? MinLevel:(_level ? _level:AdjustedMaxLevel));
     }
 
     void adjust(int _step)
@@ -156,21 +183,143 @@ class ledline
       return Level;
     }
     
+//    uint8_t correct(uint8_t _level) const
+//    {
+//      return ceil(exp((log(256)/255)*_level) - 1);
+//    }
+   
+    /** Brightness correction (gamma correction).
+     *  
+     *  It is observed that visual brightness of the led line has no linear dependence on PWM duty cycle. While duty cycle value runs from 0 up to 255, 
+     *  visual brightness increases faster on lower values and slower for higher values of duty cycle. This makes to suppose logarithmic dependence between
+     *  duty cycle and its visual brightness something as a follows
+     *  
+     *  \f{tikzpicture}
+     *    \begin{axis}
+     *    [
+     *      enlargelimits=false,
+     *      ylabel=Visual brightness (y),
+     *      xlabel=Duty cycle (x),
+     *    ]
+     *      \addplot[domain=0:255,]{255/ln(256)*ln(x+1)};
+     *    \end{axis}
+     *  \f}
+     *  
+     *  This curve may be represented by binary logarithmic function, shifted and scaled to be defined on domain [0,255] with the same values range 
+     *  
+     *  \f[
+     *    y = f(x) = k\log_2(x+1)
+     *  \f]
+     *  
+     *  Scaling factor can be expressed from the following equation
+     *  
+     *  \f[
+     *    255 = k\log_2(255+1)
+     *  \f]
+     *  
+     *  So supposed brightness function can be expressed as
+     *  
+     *  \f[
+     *    y = f(x) = \frac{255}{\log_2(255+1)}\log_2(x+1) =\frac{255}{8}\log_2(x+1)
+     *  \f]
+     *  
+     *  The main goail is to acheve linear dependence of visual brightness on dimming level - integer control parameter of brightness in the range from 0 to 255. 
+     *  For this gamma correction function \f$x=g(z)\f$ should be provided to convert dimming level to duty cycle so that \f$y = f(g(z)) = z\f$, 
+     *  where z - is a dimming level and y - visual brightness. 
+     *  Obviously such a gamma correction should be an inverse function of brightness function
+     *  
+     *  \f[
+     *    y = z = f(g(z)) = \frac{255}{8}\log_2(g(z)+1) \Rightarrow \frac{8}{255}z = \log_2(g(z)+1) \Rightarrow 2^{\frac{8}{255}z} = g(z)+1
+     *  \f]
+     *  
+     *  Thus the gamma correction function will be following
+     *  
+     *  \f[
+     *    x = g(z) = 2^{\frac{8}{255}z}-1
+     *  \f]
+     *  
+     *  \f{tikzpicture}
+     *    \begin{axis}
+     *    [
+     *      enlargelimits = false,
+     *      xlabel = Dimming level (z),
+     *      ylabel = Duty cycle (x),
+     *    ]
+     *      \addplot[domain=0:255]{2^(8*x/255)-1};
+     *    \end{axis}
+     *  \f}
+     * 
+     *   Whereas integer power of two can be calculated effectivly as a bitwise shift then its picewise linear approximation can be used
+     *   be used to calclulate gamma correction without floating point arithmetic. \f$8z\f$ can be represented as \f$255m+r\f$, where
+     *   \f$m=\lfloor 8z/255 \rfloor\f$ and \f$r=8z\pmod{255}\f$. Then
+     *   
+     *   \f[
+     *      g(z)=2^{\frac{8z}{255}}-1=2^{\frac{255m+r}{255}}-1=2^m*2^{\frac{r}{255}}-1
+     *   \f]
+     *   
+     *  Integer part \f$2^m\f$ of gamma correction function can be calculated directly by bitwise shift operation. Fractional part \f$2^{r/255}\f$
+     *  can be subsituted by linear approximation \f$r/255+1\f$.    
+     *  
+     *  \f{tikzpicture}
+     *    \begin{axis}
+     *    [
+     *      enlargelimits=false,
+     *      legend entries={{$2^{\frac{x}{255}}$},{$\frac{r}{255}+1$}},
+     *      legend pos=south east,
+     *      xlabel=$r$
+     *    ]
+     *      \addplot[domain=0:255,dashed]{2^(x/255)};
+     *      \addplot[domain=0:255]{x/255+1};
+     *    \end{axis}
+     *  \f}
+     *  
+     *  Thus picewise linearly approximated gamma correction will be as follows
+     *  
+     *  \f[
+     *    g(z)=2^m\left(\frac{r}{255}+1\right)-1=2^{\lfloor 8z/255 \rfloor}\left(\frac{8z\pmod{255}}{255}+1\right)-1=\frac{2^{\lfloor 8z/255 \rfloor}(8z\pmod{255}+255)}{255}-1
+     *  \f]
+     *  
+     *  Or 
+     *  
+     *  \f[
+     *    g(z)=\frac{2^{\lfloor 8z/255 \rfloor}(8z\pmod{255}+255)}{255}-1
+     *  \f]
+     *    
+     *  Whereas integer division provides truncated result (rounded toward zero) remainder may be analyzed to increase precision. Let
+     *  
+     *  \f[
+     *    v(z)= 2^{\lfloor 8z/255 \rfloor}(8z\pmod{255}+255)
+     *  \f]
+     *  
+     *  Then
+     *  
+     *  \f[
+     *    g(z)=\lfloor\frac{v(z)}{255}\rfloor-1+\begin{cases}1 & v(z)\pmod{255} >=128 \\0 & \text{otherwise}\end{cases}
+     *  \f]
+     *  
+     *  \param[in]  _z  Dimming level (linear dimming control).
+     *  \return Corrected duty cycle corresponding to specified dimming level.
+     */
+    uint8_t gamma(uint8_t _z)
+    {
+      udiv8_t d;
+      
+      d = udiv(_z << 3, 255);
+      d = udiv((1 << d.quot)*(d.rem + 255), 255);
+      return d.quot - 1 + (d.rem&0x80 >> 7);
+    }
+    
   private:
 
                   uint8_t Level;              //< Current ledline control pin PWМ level.
                   uint8_t Pin;                //< Ledline control pin.
-                  uint8_t AdjustedMaxLevel;   //< Adjusted brightnes maximum
+                  uint8_t AdjustedMaxLevel;   //< Adjusted brightness maximum
 
-    uint8_t correct(uint8_t _level) const
-    {
-      return ceil(exp((log(256)/255)*_level) - 1);
-    }
     
     void set(uint8_t _level)
     {
       Level = _level;
-      analogWrite(Pin, correct(Level));
+      analogWrite(Pin, gamma(Level));
     }
 
     class task:public ::task
@@ -270,7 +419,7 @@ class ledline
         unsigned long Time;   //< Previouse timestamp.
         bool AdjustMaxLevel;  //< Flag to adjust max brightness level by targed one.
 
-        static const int LevelingTime = 2000; //< Transition time between to different brightness levels in milliseconds.
+        static const int LevelingTime = 1024; //< Transition time between to different brightness levels in milliseconds.
 
         struct
         {
@@ -289,7 +438,7 @@ class remote_control_input_task:public task
 
   void adjust(int _sign)
   {
-    Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>3));
+    Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>2));
   }
 
   void operator()()
@@ -317,12 +466,12 @@ class remote_control_input_task:public task
             adjust(+1);
           break;
           default:
-            Ledline.toggle();
+            Ledline.toggle(Ledline.MaxLevel);
         }
       }
       else
       if(IrReceiver.decodedIRData.protocol != UNKNOWN)
-        Ledline.toggle();
+        Ledline.toggle(Ledline.MaxLevel);
     }
     
     /* Loop back to remote control input check.
@@ -347,20 +496,13 @@ class toggle_button_task:public task
         uint8_t l = Ledline.get();
         
         if(l == Ledline.MinLevel)
-          Sign = +1;
+          Ledline.toggle(Ledline.MaxLevel);
         else
-        if(l == Ledline.MaxLevel)
-          Sign = -1;
-          
-        RemoteControlInputTask.adjust(Sign);
+          RemoteControlInputTask.adjust(-1);
     }
     Queue.put(this);
   }
 
-private:
-
-  int Sign;
-  
 } ToggleButtonTask;
 
 static void print_version()
@@ -395,6 +537,5 @@ void setup() {
 
 void loop() {
   // put your main code here, to run repeatedly:
-  if(Queue.populated())
-    (*Queue.get())();
+  Queue.dispatch();
 }
