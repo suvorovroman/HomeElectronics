@@ -6,9 +6,12 @@
  *        4 brightness transition levels.
  *        Integral gamma correction. 
  *        Toggle maximizes brightness.
+ *  1.3   Task scheduler with normal and ISR queue.
+ *        Interrupt to start IrReceiver decoding loop.
  */
-#define VERSION 0x0102
+#define VERSION 0x0103
 
+/** Task. */
 class task
 {
   public:
@@ -17,14 +20,7 @@ class task
 
     virtual void operator()() = 0;
 
-    /** Check if the task is in processing queue.
-     *  \return true if the task is in queue or false otherwise.
-     */
-    bool idle() const
-    {
-      return Next == NULL;
-    }
-
+    /** Task queue. */
     class queue
     { 
       public:
@@ -32,29 +28,48 @@ class task
         /** Create empty queue. */
         queue():Tail(NULL){}
 
-        /** Put task in processing queue.
-         *  \param[in]  _t  Task to put into the queue.
-         */
-        void put(task *t)
+        task* head()
         {
-          if(Tail)
-          {
-            t->Next = Tail->Next;
-            Tail->Next = t;
-          }
-          else
-            t->Next = t;
-          Tail = t;
-        }
-  
-        virtual void dispatch()
-        {
-          if(Tail)
-            (*get())();
+          return Tail;
         }
 
-      protected:
-        
+        task* tail()
+        {
+          return Tail->Next;
+        }
+
+        /** Put task in queue.
+         *  
+         *  Puts task at the queue if it is not yet in any queue and returns pointer to the task. Does nothing and return NULL
+         *  if task already in a queue.
+         *  
+         *  \param[in]  _t  Task to put into the queue.
+         *  \return Pointer to the task or NULL if task already is in queue.
+         */
+        task* put(task *t)
+        {
+          if(t->Next == NULL)
+          {
+            if(Tail)
+            {
+              t->Next = Tail->Next;
+              Tail->Next = t;
+            }
+            else
+              t->Next = t;
+            Tail = t;
+            return t;     // t is scheduled for execution
+          }
+          else
+            return NULL;  // t is already in a queue and is not scheduled
+        }
+
+        /** Removes head task from queue and returns pointer to it.
+         *  
+         *  Does not check if queue is not empty and in the case result is unpredictable.
+         *  
+         *  \return Pointer to removed task;
+         */
         task* get()
         {
           auto t = Tail->Next;
@@ -65,7 +80,7 @@ class task
           t->Next = NULL;
           return t;
         }
-  
+
       private:
   
         /* 
@@ -81,13 +96,59 @@ class task
       
     };
 
+    /** Task scheduler. */
+    class scheduler
+    {
+      public:
+
+        scheduler():ISRFlag(false){}
+
+        task* put(task* t)
+        {
+          return Queue.put(t);
+        }
+
+        task* putISR(task* t)
+        {
+          t = ISRQueue.put(t);
+          if(t)
+            ISRFlag = true;
+          return t;
+        }
+
+        void execute()
+        {
+          if(ISRFlag)
+          {
+            (*ISRQueue.tail())();
+            noInterrupts();
+            ISRQueue.get();
+            if(ISRQueue.head() == NULL)
+              ISRFlag = false;
+            interrupts();
+          }
+          else
+          if(Queue.head())
+            (*Queue.get())();
+        }
+
+      private:
+
+        queue Queue;
+        queue ISRQueue;
+
+        public:
+        byte  ISRFlag;
+        
+    };
+
   private:
 
     task *Next;
   
 };
 
-task::queue Queue;
+task::scheduler Scheduler;
 
 #include <IRremote.hpp>
 
@@ -155,16 +216,15 @@ class ledline
 
     void toggle_discrete()
     {
-      if(SwitchTask.idle())
-        Queue.put(&SwitchTask);
+      Scheduler.put(&SwitchTask);
     }
 
     void fill_up_to(uint8_t _level, bool _adjust = false)
     {
-      if(_level != Level && LevelTask.idle())
+      if(_level != Level)
       {
-        LevelTask.begin(_level, _adjust);
-        Queue.put(&LevelTask);
+        if(Scheduler.put(&LevelTask))
+          LevelTask.begin(_level, _adjust);
       }
     }
 
@@ -183,11 +243,6 @@ class ledline
       return Level;
     }
     
-//    uint8_t correct(uint8_t _level) const
-//    {
-//      return ceil(exp((log(256)/255)*_level) - 1);
-//    }
-   
     /** Brightness correction (gamma correction).
      *  
      *  It is observed that visual brightness of the led line has no linear dependence on PWM duty cycle. While duty cycle value runs from 0 up to 255, 
@@ -361,7 +416,7 @@ class ledline
             Stat.Count++;
 
             if(dl == 0)
-              Queue.put(this);
+              Scheduler.put(this);
             else
             {
               int l = Ledline.Level + dl;
@@ -369,7 +424,7 @@ class ledline
               if(dl > 0)
               {
                 if(l < Level)
-                  Queue.put(this);
+                  Scheduler.put(this);
                 else
                 if(l > Level)
                   l = Level;
@@ -379,7 +434,7 @@ class ledline
               if(dl < 0)
               {
                 if(l > Level)
-                  Queue.put(this);
+                  Scheduler.put(this);
                 else
                 if(l < Level)
                   l = Level;
@@ -434,54 +489,70 @@ class ledline
 
 class remote_control_input_task:public task
 {
+  private:
+
+    class invoker:public task
+    {
+      public:
+
+          void operator()()
+          {
+            static remote_control_input_task t;
+            Scheduler.put(&t);
+          }
+          
+    };
+
   public:
 
-  void adjust(int _sign)
-  {
-    Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>2));
-  }
-
-  void operator()()
-  {
-    if(IrReceiver.decode())
+    void adjust(int _sign)
     {
-      if(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_WAS_OVERFLOW)
-        Serial.println(F("Overflow detected"));
-      else
-      {
-        IrReceiver.printIRResultShort(&Serial);
-        IrReceiver.printIRSendUsage(&Serial);  
-      }
-      
-      IrReceiver.resume();
-
-      if(IrReceiver.decodedIRData.protocol == NEC && IrReceiver.decodedIRData.address == 0)
-      {
-        switch(IrReceiver.decodedIRData.command)
-        {
-          case CAR_BUTTON_MINUS:
-            adjust(-1);
-          break;
-          case CAR_BUTTON_PLUS:
-            adjust(+1);
-          break;
-          default:
-            Ledline.toggle(Ledline.MaxLevel);
-        }
-      }
-      else
-      if(IrReceiver.decodedIRData.protocol != UNKNOWN)
-        Ledline.toggle(Ledline.MaxLevel);
+      Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>2));
     }
-    
-    /* Loop back to remote control input check.
-     *  This is equal simple loop processing. In the future
-     *  this task should be initiated from external interrupt.
-     */
-    Queue.put(this); 
-  }
+  
+    void operator()()
+    {
+      if(IrReceiver.decode())
+      {
+        if(IrReceiver.decodedIRData.flags & IRDATA_FLAGS_WAS_OVERFLOW)
+          Serial.println(F("Overflow detected"));
+        else
+        {
+          IrReceiver.printIRResultShort(&Serial);
+          IrReceiver.printIRSendUsage(&Serial);  
+        }
+        
+        IrReceiver.resume();
+  
+        if(IrReceiver.decodedIRData.protocol == NEC && IrReceiver.decodedIRData.address == 0)
+        {
+          switch(IrReceiver.decodedIRData.command)
+          {
+            case CAR_BUTTON_MINUS:
+              adjust(-1);
+            break;
+            case CAR_BUTTON_PLUS:
+              adjust(+1);
+            break;
+            default:
+              Ledline.toggle(Ledline.MaxLevel);
+          }
+        }
+        else
+        if(IrReceiver.decodedIRData.protocol != UNKNOWN)
+          Ledline.toggle(Ledline.MaxLevel);
+      }
+      else      
+        Scheduler.put(this); 
+    }
 
-} RemoteControlInputTask;
+    static void ISRoutine()
+    {
+      static invoker invoker;
+      Scheduler.putISR(&invoker);
+    }
+  
+};
 
 class toggle_button_task:public task
 {
@@ -498,9 +569,12 @@ class toggle_button_task:public task
         if(l == Ledline.MinLevel)
           Ledline.toggle(Ledline.MaxLevel);
         else
-          RemoteControlInputTask.adjust(-1);
+        {
+          remote_control_input_task t;
+          t.adjust(-1);
+        }
     }
-    Queue.put(this);
+    Scheduler.put(this);
   }
 
 } ToggleButtonTask;
@@ -531,11 +605,12 @@ void setup() {
   pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
   Ledline.begin(LEDLINE_PIN);
 
-  Queue.put(&RemoteControlInputTask);
-  Queue.put(&ToggleButtonTask);
+  Scheduler.put(&ToggleButtonTask);
+
+  attachInterrupt(digitalPinToInterrupt(3), remote_control_input_task::ISRoutine, FALLING);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-  Queue.dispatch();
+  Scheduler.execute();
 }
