@@ -1,154 +1,27 @@
 /*
- *  0.1   Switch on/off with dimming effect.
- *  1.0   Brightness adjustment (NEC:0 only)
- *  1.1   Exponential brightness adjustment, constant speed.
- *  1.2   Shortened brightness transition time (1024 ms).
- *        4 brightness transition levels.
- *        Integral gamma correction. 
- *        Toggle maximizes brightness.
- *  1.3   Task scheduler with normal and ISR queue.
- *        Interrupt to start IrReceiver decoding loop.
+ *	0.1	Switch on/off with dimming effect.
+ *	1.0	Brightness adjustment (NEC:0 only)
+ *	1.1	Exponential brightness adjustment, constant speed.
+ *	1.2	Shortened brightness transition time (1024 ms).
+ *		4 brightness transition levels.
+ *		Integral (integer)  gamma correction. 
+ *		Toggle maximizes brightness.
+ *	1.3	Task scheduler with normal and ISR queue.
+ *		Interrupt to start IrReceiver decoding loop.
+ *	1.4	Toggle button task started by PCINT (no polling).
+ *		Idle mode when schedulers queues are empty.
+ *		8 brightness levels .
  */
-#define VERSION 0x0103
+#define VERSION 0x0104
 
-/** Task. */
-class task
-{
-  public:
-
-    task():Next(NULL){}
-
-    virtual void operator()() = 0;
-
-    /** Task queue. */
-    class queue
-    { 
-      public:
-
-        /** Create empty queue. */
-        queue():Tail(NULL){}
-
-        task* head()
-        {
-          return Tail;
-        }
-
-        task* tail()
-        {
-          return Tail->Next;
-        }
-
-        /** Put task in queue.
-         *  
-         *  Puts task at the queue if it is not yet in any queue and returns pointer to the task. Does nothing and return NULL
-         *  if task already in a queue.
-         *  
-         *  \param[in]  _t  Task to put into the queue.
-         *  \return Pointer to the task or NULL if task already is in queue.
-         */
-        task* put(task *t)
-        {
-          if(t->Next == NULL)
-          {
-            if(Tail)
-            {
-              t->Next = Tail->Next;
-              Tail->Next = t;
-            }
-            else
-              t->Next = t;
-            Tail = t;
-            return t;     // t is scheduled for execution
-          }
-          else
-            return NULL;  // t is already in a queue and is not scheduled
-        }
-
-        /** Removes head task from queue and returns pointer to it.
-         *  
-         *  Does not check if queue is not empty and in the case result is unpredictable.
-         *  
-         *  \return Pointer to removed task;
-         */
-        task* get()
-        {
-          auto t = Tail->Next;
-          if(t == Tail)
-            Tail = NULL;
-          else
-            Tail->Next = t->Next;
-          t->Next = NULL;
-          return t;
-        }
-
-      private:
-  
-        /* 
-         *  Task queue as circular linked list.
-         *              Tail  
-         *                | 
-         *                v
-         *  T1->T2->...->Tn
-         *  ^             |
-         *  +-------------+
-         */
-         task *Tail;
-      
-    };
-
-    /** Task scheduler. */
-    class scheduler
-    {
-      public:
-
-        scheduler():ISRFlag(false){}
-
-        task* put(task* t)
-        {
-          return Queue.put(t);
-        }
-
-        task* putISR(task* t)
-        {
-          t = ISRQueue.put(t);
-          if(t)
-            ISRFlag = true;
-          return t;
-        }
-
-        void execute()
-        {
-          if(ISRFlag)
-          {
-            (*ISRQueue.tail())();
-            noInterrupts();
-            ISRQueue.get();
-            if(ISRQueue.head() == NULL)
-              ISRFlag = false;
-            interrupts();
-          }
-          else
-          if(Queue.head())
-            (*Queue.get())();
-        }
-
-      private:
-
-        queue Queue;
-        queue ISRQueue;
-
-        public:
-        byte  ISRFlag;
-        
-    };
-
-  private:
-
-    task *Next;
-  
-};
+#include "task.h"
 
 task::scheduler Scheduler;
+
+void loop() {
+  // put your main code here, to run repeatedly:
+  Scheduler.execute();
+}
 
 #include <IRremote.hpp>
 
@@ -176,28 +49,31 @@ task::scheduler Scheduler;
 #define CAR_BUTTON_8        0x52
 #define CAR_BUTTON_9        0x4A
 
+// IR remote control NEBULA
+// Protocol = NEC Address = 0xFD07
+#define NEB_ONOFF           0xA
+#define NEB_SCAFF           0xB
+#define NEB_NEBULA          0x3
+#define NEB_B_PLUS          0x1
+#define NEB_B_MINUS         0x5
+#define NEB_S_PLUS          0x4
+#define NEB_S_MINUS         0x2
+#define NEB_LA_MINUS        0xC
+#define NEB_LA_PLUS         0xD
+#define NEB_LA_MODE         0xE
+#define NEB_LA_ONOFF        0xF
+#define NEB_RESET           0X1A
+
 // IR remote control Polaris
 // Protocol = PulseDistance
 // RawData
 #define POLARIS_BUTTON_ON_OFF 0x3B2 
 
-#define CONTROL_PIN       3
-#define LEDLINE_PIN       5   
-#define TEST_BUTTON_PIN   6
+#define PIN_CONTROL	3	// PCINT19/OC2B/INT1
+#define PIN_LEDLINE	5	// PCINT21/OC0B/T1   
+#define PIN_TOGGLE	6	// PCINT22/OC0A/AIN0
 
-struct udiv8_t
-{
-  uint8_t quot;
-  uint8_t rem;
-  udiv8_t(){}
-  udiv8_t(uint8_t _q, uint8_t _r):quot(_q), rem(_r){}
-};
-
-
-struct udiv8_t udiv(uint16_t _n, uint8_t _d)
-{
-  return udiv8_t(_n/_d, _n%_d);
-}
+#include "udiv.h"
 
 class ledline
 {
@@ -208,7 +84,7 @@ class ledline
 
     ledline():SwitchTask(*this), LevelTask(*this), Level(MinLevel), AdjustedMaxLevel(MaxLevel){}
 
-    void begin(uint8_t _pin)
+    void mount(uint8_t _pin)
     {
        Pin = _pin;
        pinMode(Pin, OUTPUT);
@@ -507,7 +383,7 @@ class remote_control_input_task:public task
 
     void adjust(int _sign)
     {
-      Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>2));
+      Ledline.adjust(_sign*((Ledline.MaxLevel - Ledline.MinLevel + 1)>>3));
     }
   
     void operator()()
@@ -521,6 +397,7 @@ class remote_control_input_task:public task
           IrReceiver.printIRResultShort(&Serial);
           IrReceiver.printIRSendUsage(&Serial);  
         }
+	Serial.flush();
         
         IrReceiver.resume();
   
@@ -554,30 +431,31 @@ class remote_control_input_task:public task
   
 };
 
-class toggle_button_task:public task
-{
-  public:
+/** Test task.
 
-  toggle_button_task(){}
+    Test task is used for different testing purposes. It should be modified for each specific case.
+*/
+class test:public task
+{
+public:
 
   void operator()()
   {
-    if(digitalRead(TEST_BUTTON_PIN) == LOW)
-    {
-        uint8_t l = Ledline.get();
-        
-        if(l == Ledline.MinLevel)
-          Ledline.toggle(Ledline.MaxLevel);
-        else
-        {
-          remote_control_input_task t;
-          t.adjust(-1);
-        }
-    }
-    Scheduler.put(this);
-  }
+    if(digitalRead(PIN_TOGGLE) == LOW)
+      {
+	uint8_t l = Ledline.get();
 
-} ToggleButtonTask;
+	if(l == Ledline.MinLevel)
+	  Ledline.toggle(Ledline.MaxLevel);
+	else
+	  {
+	    remote_control_input_task t;
+	    t.adjust(-1);
+	  }
+      }
+   }
+  
+};
 
 static void print_version()
 {
@@ -586,6 +464,7 @@ static void print_version()
   Serial.print(VERSION >> 8);
   Serial.print('.');
   Serial.println(VERSION&0x0F);
+  Serial.flush();
 }
 
 void setup() {
@@ -594,23 +473,31 @@ void setup() {
   Serial.begin(9600);
   print_version();
   /* Control pin here is set in intput mode without pullup. 
-   *  If its neccessary external pullup register sholbd used or
+   *  If its neccessary external pullup register should be used or
    *  different or self made reciever library.
    */
-  IrReceiver.begin(CONTROL_PIN, ENABLE_LED_FEEDBACK);
+  IrReceiver.begin(PIN_CONTROL, DISABLE_LED_FEEDBACK);
   Serial.println(F("Ready to receive IR signals of protocols:"));
   printActiveIRProtocols(&Serial);
   Serial.println();
+  Serial.flush();
+  
+  Ledline.mount(PIN_LEDLINE);
+ 
+  attachInterrupt(digitalPinToInterrupt(PIN_CONTROL), remote_control_input_task::ISRoutine, FALLING);
 
-  pinMode(TEST_BUTTON_PIN, INPUT_PULLUP);
-  Ledline.begin(LEDLINE_PIN);
-
-  Scheduler.put(&ToggleButtonTask);
-
-  attachInterrupt(digitalPinToInterrupt(3), remote_control_input_task::ISRoutine, FALLING);
+  pinMode(PIN_TOGGLE, INPUT_PULLUP);
+  PCICR = 0x04;
+  PCMSK2 = 0x40;
 }
 
-void loop() {
-  // put your main code here, to run repeatedly:
-  Scheduler.execute();
+/** Test button interrupt processing.
+
+    This interrupt is used for starting different testing routines. Test task should be
+    modified for each specific test.
+*/
+ISR(PCINT2_vect)
+{
+  static test test;
+  Scheduler.putISR(&test);
 }
