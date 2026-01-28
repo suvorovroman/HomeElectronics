@@ -105,21 +105,29 @@ class task
           return t;
         }
 
-        void execute()
-        {
-	  if(ISRFlag)
-          {
+      /** \brief Executes next task from queue.
+	  Takes and executes a task from ISR queue or main queue. If both queues are empty and _sleep parameter is true
+	  puts device into sleep mode specified by parameter _mode.
+
+	  \param[in]	_sleep	Put device into sleeping mode if ISR and main queues are empty.
+	  \param[in]	_mode	Sleeping mode.
+       */
+      void execute(bool _sleep = false, uint8_t _mode = SLEEP_MODE_IDLE)
+      {
+	if(ISRFlag)
+	  {
 	    (*ISRQueue.tail())();
-            noInterrupts();
-            ISRQueue.get();
-            if(ISRQueue.head() == NULL)
+	    noInterrupts();
+	    ISRQueue.get();
+	    if(ISRQueue.head() == NULL)
 	      ISRFlag = false;
-            interrupts();
-          }
-          else
-	    if(Queue.head())
-	      (*Queue.get())();
-	    else
+	    interrupts();
+	  }
+	else
+	  if(Queue.head())
+	    (*Queue.get())();
+	  else
+	    if(_sleep)
 	      {
 		noInterrupts();
 		if(ISRFlag)
@@ -128,14 +136,14 @@ class task
 		else
 		  {
 		    /* ISRQueue really empty. Go idle. */
-		    set_sleep_mode(SLEEP_MODE_IDLE);
+		    set_sleep_mode(_mode);
 		    sleep_enable();
 		    interrupts();
 		    sleep_cpu();
 		    sleep_disable();
 		  }
 	      }
-        }
+      }
 
     private:
 	queue Queue;

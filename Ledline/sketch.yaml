@@ -1,0 +1,12 @@
+profiles:
+ nano:
+  platforms:
+   - platform: arduino:avr
+  port: /dev/ttyUSB0
+  fqbn: arduino:avr:nano
+  libraries:
+   - IRremote (4.5.0)
+   
+default_port: /dev/tnt3
+default_fqbn: arduino:avr:nano
+
