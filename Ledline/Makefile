@@ -5,6 +5,11 @@ picsimlab:
 
 nano:
 	arduino-cli compile --profile nano
+	arduino-cli upload --profile nano
+
+uno:
+	arduino-cli compile --profile uno
+	arduino-cli upload --profile uno
 
 upload:
 	arduino-cli upload

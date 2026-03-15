@@ -1,4 +1,4 @@
-/*
+/** \file
  *	0.1	Switch on/off with dimming effect.
  *	1.0	Brightness adjustment (NEC:0 only)
  *	1.1	Exponential brightness adjustment, constant speed.
@@ -16,8 +16,10 @@
  *		IR receiving process is stoped until pin interrupt.
  *		Plus and Minus adjust brightness by 1.
  *		4 preset brightness levels with Next/Prev buttons
+ *	1.6	Change gloal task Scheduler to task::scheduler::Self
+ *		Plus and Minus adjust brightness by 1 after gamma correction.
  */
-#define VERSION 0x0105
+#define VERSION 0x0106
 
 #ifdef PICSIMLAB
 #define	SLEEP	false
@@ -29,11 +31,9 @@
 
 #include "task.h"
 
-task::scheduler Scheduler;
-
 void loop() {
   // put your main code here, to run repeatedly:
-  Scheduler.execute(SLEEP);
+  task::scheduler::Self.execute(SLEEP);
 }
 
 /** Task which can trace information into serial port. */
@@ -103,10 +103,27 @@ private:
 // RawData
 #define POLARIS_BUTTON_ON_OFF 0x3B2 
 
-#define PIN_CONTROL	3	// PD3(PCINT19/OC2B/INT1)
-#define PIN_LEDLINE	5	// PD5(PCINT21/OC0B/T1)   
-#define PIN_TOGGLE	6	// PD6(PCINT22/OC0A/AIN0)
-#define PIN_RXD		0	// PD0(RXD/PCINT16)
+#define PIN_CONTROL	3	///< PD3(PCINT19/OC2B/INT1)
+#define PIN_LEDLINE	5	///< PD5(PCINT21/OC0B/T1)
+
+/** Input Capture Pin
+
+    Pin to measure contact bounce delay.
+*/
+#define PIN_BOUNCE	8	///< PB0(PCINT0/CLKO/ICP1)
+
+/** \brief Toggle pin.
+
+    Toggle ledline between to states based on pin change interrupt (PCINTx).
+    
+    \todo Connect simple one-way switch instead of test button to toggle light to pin.
+    On changing switch state ledline is toggling between min and max levels. It may be used by usual wall light
+    switch to toggle ledline without remote control.
+    
+ */
+#define PIN_TOGGLE	6	///< PD6(PCINT22/OC0A/AIN0)
+
+#define PIN_RXD		0	///< PD0(RXD/PCINT16)
 
 #include "udiv.h"
 
@@ -118,17 +135,17 @@ public:
   /** Brightness level. */
   typedef uint8_t brightness;
   
-  static const uint8_t MinLevel	= 0x00;	//< Minimum brightness level.
-  static const uint8_t MaxLevel	= 0xFF;	//< Maximum brightness level.
+  static const uint8_t MinLevel	= 0x00;	///< Minimum brightness level.
+  static const uint8_t MaxLevel	= 0xFF;	///< Maximum brightness level.
   
   /**  Preset brightness. */
   enum class preset
     {
-      No,	//< No illumination.
-      Night,	//< To find a way.
-      Twilight,	//< To see everythin in general.
-      Day,	//< To read.
-      Bound	//< Upper bound
+      No,	///< No illumination.
+      Night,	///< To find a way.
+      Twilight,	///< To see everythin in general.
+      Day,	///< To read.
+      Bound	///< Upper bound
     };
 
   ledline():Level(MinLevel), Dimm(*this)
@@ -151,31 +168,38 @@ public:
   */
   operator uint8_t() const {return Level;}
 
-  /** Set current brightness level
+  /** Set current brightness level.
       \param[in] _level		Brightness level.
       \return Modified ledline object reference.
   */
   ledline& operator =(uint8_t _level)
   {
-    Level = _level;
-    analogWrite(Pin, gamma(Level));
+    analogWrite(Pin, gamma(Level = _level));
     return *this;
   }
 
   /** Increase current ledline brightness level by 1.
+      
       If current level becomes higher than MaxLevel it rounds to MinLevel.
   */
-  void operator ++()
+  uint8_t operator ++()
   {
-    *this = ++Level;
+    auto l = Level;
+    for(auto g = gamma(l); g == gamma(++l););
+    *this = l;
+    return l;
   }
   
   /** Decrese current brightness level by 1.
-      If current level becomes lower than MinLevel it rouns to MaxLevel.
+      
+      If current level becomes lower than MinLevel it rouns to MaxLevel. Brightness adjustment.
   */
-  void operator--()
+  uint8_t operator--()
   {
-    *this = --Level;
+    auto l = Level;
+    for(auto g = gamma(l); g == gamma(--l););
+    *this = l;
+    return l;
   }
 
   /** Sets/gets preset mode brightness.
@@ -695,7 +719,7 @@ public:
        \param[in]	_r	Rounding parameter
        \return Corrected duty cycle corresponding to specified dimming level.
  */
-  uint8_t gamma(uint8_t _z, uint8_t _r = 0)
+  static uint8_t gamma(uint8_t _z, uint8_t _r = 0)
   {
     udiv8_t d;
 
@@ -707,9 +731,10 @@ public:
 private:
 
   uint8_t	Level;	//< Current ledline control pin PWМ level.
-  uint8_t	Pin:4;	//< Ledline control pin number.
-  
-  brightness	Preset[(uint8_t)preset::Bound];	//< Preset level brightness (intermediate only).
+  uint8_t	Pin;	//< Ledline control pin number.
+
+  /** \brief Preset brightness levels. */
+  brightness	Preset[(uint8_t)preset::Bound];
   
   /** Ledline driver task.
       Task with a reference to specific ledline.
@@ -742,7 +767,7 @@ public:
       Stat.Count++;
 
       if(dl == 0)
-	Scheduler.put(this);
+	task::scheduler::Self.put(this);
       else
 	{
 	  int l = Ledline.Level + dl;
@@ -750,7 +775,7 @@ public:
 	  if(dl > 0)
 	    {
 	      if(l < Level)
-		Scheduler.put(this);
+		task::scheduler::Self.put(this);
 	      else
 		if(l > Level)
 		  l = Level;
@@ -760,7 +785,7 @@ public:
 	    if(dl < 0)
 	      {
 		if(l > Level)
-		  Scheduler.put(this);
+		  task::scheduler::Self.put(this);
 		else
 		  if(l < Level)
 		    l = Level;
@@ -779,7 +804,7 @@ public:
 
     void invoke(uint8_t _level)
     {
-      if(_level != Ledline.Level && Scheduler.put(this))
+      if(_level != Ledline.Level && task::scheduler::Self.put(this))
 	{
 	  Level = _level;
 	  Distance = Level - Ledline.Level;
@@ -854,7 +879,7 @@ public:
 	    This task scheduled only from one another task.
 	    So it can not interfere with other own instances.
 	  */
-	  Scheduler.put(&t);
+	  task::scheduler::Self.put(&t);
 	  t.Count = Count;
 	  t.Time = Time;
 	}
@@ -952,7 +977,7 @@ public:
 	      Ledline.Dimm.toggle();
 	}
       else      
-        Scheduler.put(this); 
+	task::scheduler::Self.put(this); 
     }
 
   };
@@ -966,7 +991,7 @@ public:
     static void ISRoutine()
     {
       static listen t;
-      Scheduler.putISR(&t);
+      task::scheduler::Self.putISR(&t);
     }
     
   private:
@@ -975,7 +1000,7 @@ public:
     void operator()()
     {
       static input t;
-      Scheduler.put(&t);
+      task::scheduler::Self.put(&t);
       /* Start IR receiving process before input task begins. */
       IrReceiver.start();
     }
@@ -995,23 +1020,19 @@ public:
   static void invokeISR()
   {
     static test t;
-    Scheduler.putISR(&t);
+    task::scheduler::Self.putISR(&t);
   }
 
 private:
 
   void trace() noexcept
   {
-    if(digitalRead(PIN_TOGGLE) == LOW)
-      {
-	if(Ledline == ledline::MinLevel)
-	  Ledline.Dimm.toggle();
-	else
-	 Ledline.Dimm.prev();
-      }
-   }
+    Ledline.Dimm.toggle();
+  }
   
 };
+
+#include "contact_bounce_meter.h"
 
 /** Entry point. */
 class begin:public traceable
@@ -1021,7 +1042,7 @@ public:
   static void invoke()
   {
     static begin t;
-    Scheduler.put(&t);
+    task::scheduler::Self.put(&t);
   }
   
 private:
@@ -1048,11 +1069,16 @@ private:
     Ledline.mount(PIN_LEDLINE);
    
     pinMode(PIN_TOGGLE, INPUT_PULLUP);
+    pinMode(PIN_BOUNCE, INPUT_PULLUP);
+
     PCICR = _BV(PCIE2);
     PCMSK2 = _BV(PCINT22);
-
-    /* Pullup serial receive data pin to avoid noise wher it is disconnected. */
+    
+    /* Pullup serial receive data pin to avoid noise when it is disconnected. */
     pinMode(PIN_RXD, INPUT_PULLUP);
+
+    /* Initialize bounce meter. */
+    contact_bounce_meter::Self.begin();
   }
 
   void version()
@@ -1073,9 +1099,12 @@ void setup() {
 /** Test button interrupt processing.
 
     This interrupt is used for starting different testing routines. Test task should be
-    modified for each specific test.
+    modified for each specific test (#PIN_TOGGLE).
+
+    \todo This interrupt is to be used for toggling light from external switch.
 */
 ISR(PCINT2_vect)
 {
   test::invokeISR();
 }
+

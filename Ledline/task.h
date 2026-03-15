@@ -1,9 +1,12 @@
+#ifndef __TASK_H__
+#define __TASK_H__
+
 #include <avr/sleep.h>
 
 /** Task. */
 class task
 {
-  public:
+public:
 
     task():Next(NULL){}
 
@@ -148,9 +151,12 @@ class task
     private:
 	queue Queue;
         queue ISRQueue;
+        bool  ISRFlag;
 
     public:
-        byte  ISRFlag;
+      
+      /** Task scheduler singleton object. */
+      static scheduler Self;
         
     };
 
@@ -159,3 +165,5 @@ class task
     task *Next;
   
 };
+
+#endif
