@@ -104,13 +104,9 @@ private:
 #define POLARIS_BUTTON_ON_OFF 0x3B2 
 
 #define PIN_CONTROL	3	///< PD3(PCINT19/OC2B/INT1)
+
+/** Ledline control pin. */
 #define PIN_LEDLINE	5	///< PD5(PCINT21/OC0B/T1)
-
-/** Input Capture Pin
-
-    Pin to measure contact bounce delay.
-*/
-#define PIN_BOUNCE	8	///< PB0(PCINT0/CLKO/ICP1)
 
 /** \brief Toggle pin.
 
@@ -231,7 +227,7 @@ public:
      *  This curve may be represented by binary logarithmic function, shifted and scaled to be defined on domain [0,255] with the same values range 
      *  
      *  \f[
-     *    y = f(x) = k\log_2(x+1)
+     *    y = f(x) = k\log_2(x+1) 
      *  \f]
      *  
      *  Scaling factor can be expressed from the following equation
@@ -1032,8 +1028,6 @@ private:
   
 };
 
-#include "contact_bounce_meter.h"
-
 /** Entry point. */
 class begin:public traceable
 {
@@ -1068,17 +1062,11 @@ private:
 
     Ledline.mount(PIN_LEDLINE);
    
-    pinMode(PIN_TOGGLE, INPUT_PULLUP);
-    pinMode(PIN_BOUNCE, INPUT_PULLUP);
-
     PCICR = _BV(PCIE2);
     PCMSK2 = _BV(PCINT22);
     
     /* Pullup serial receive data pin to avoid noise when it is disconnected. */
     pinMode(PIN_RXD, INPUT_PULLUP);
-
-    /* Initialize bounce meter. */
-    contact_bounce_meter::Self.begin();
   }
 
   void version()
